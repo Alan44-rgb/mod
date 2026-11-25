@@ -7,7 +7,9 @@
 #include <mmsystem.h>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <optional>
+#include <type_traits>
 
 using namespace geode::prelude;
 
@@ -51,7 +53,16 @@ void showMarker(PlayerObject* player, bool pressed, std::optional<double> durati
 
     if (shortHold && Mod::get()->getSettingValue<bool>("sound")) {
         const auto path = Mod::get()->getResourcesDir() / "ding.wav";
-        PlaySoundA(path.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+        // Geode 5 uses wide native paths on Windows, while Geode 6 supplies UTF-8.
+        []<typename Character>(const Character* filename) {
+            constexpr auto flags = SND_FILENAME | SND_ASYNC | SND_NODEFAULT;
+            if constexpr (std::is_same_v<Character, wchar_t>) {
+                PlaySoundW(filename, nullptr, flags);
+            } else {
+                auto wide = std::filesystem::u8path(filename).wstring();
+                PlaySoundW(wide.c_str(), nullptr, flags);
+            }
+        }(path.c_str());
     }
 }
 }
