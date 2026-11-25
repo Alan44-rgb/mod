@@ -1,15 +1,28 @@
 {
   "geode": "6.0.0",
-  "gd": { "win": "2.2091" },
+  "gd": {
+    "win": "2.2091"
+  },
   "id": "pulsecounter.input-display",
   "name": "Pulse Counter",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "developer": "Pulse Counter",
-  "description": "Shows jump inputs and hold durations in Geometry Dash.",
-  "resources": { "files": ["resources/ding.wav"] },
+  "description": "Shows jump holds in 240 Hz frame equivalents and counts them in a HUD.",
+  "resources": {
+    "files": [
+      "resources/ding.wav"
+    ]
+  },
   "settings": {
-    "release-markers": { "name": "Release markers", "type": "bool", "default": true },
-    "sound": { "name": "Play ding on short holds", "type": "bool", "default": true },
-    "ding-ms": { "name": "Short hold threshold (ms)", "type": "int", "default": 8, "min": 1, "max": 100 }
+    "release-markers": {
+      "name": "Release markers",
+      "type": "bool",
+      "default": true
+    },
+    "sound": {
+      "name": "Ding on a 1-frame hold",
+      "type": "bool",
+      "default": true
+    }
   }
 }
