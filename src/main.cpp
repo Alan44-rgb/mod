@@ -169,6 +169,8 @@ struct Analysis {
     size_t nextMarker = 0;
     int shift = -1;
     int endTick = 0;
+    size_t verifiedTiming = 0;
+    int failureTick = 0;
     bool internalReset = false;
     std::optional<bool> outcome;
 
@@ -235,6 +237,19 @@ struct Analysis {
     }
 };
 
+struct ReplayTiming {
+    bool beforeCommands;
+    int offset;
+    bool restoreStep;
+};
+
+constexpr std::array<ReplayTiming, 8> timings{{
+    {true, 0, true}, {false, 0, true},
+    {true, -1, true}, {false, -1, true},
+    {true, 1, true}, {false, 1, true},
+    {true, 0, false}, {false, 0, false}
+}};
+
 int currentTick(GJBaseGameLayer* layer) {
     return static_cast<int>(std::floor(layer->m_gameState.m_levelTime * referenceRate + 0.00001));
 }
@@ -283,7 +298,14 @@ class $modify(PulsePlay, PlayLayer) {
     void levelComplete() {
         auto& a = m_fields->analysis;
         if (a.replaying()) {
-            if (!a.outcome) a.outcome = a.nextInput == a.replay.size();
+            if (!a.outcome) {
+                const bool noMissedPress = std::none_of(a.replay.begin() + a.nextInput,
+                    a.replay.end(), [](const Input& input) { return input.down; });
+                const bool matchingFinish = a.phase == Phase::Scanning ||
+                    std::abs(currentTick(this) - a.endTick) <= 2;
+                a.outcome = noMissedPress && matchingFinish;
+                a.failureTick = currentTick(this);
+            }
             return;
         }
         if (a.phase == Phase::Recording && !m_isPracticeMode && !a.jumps.empty()) {
@@ -297,7 +319,10 @@ class $modify(PulsePlay, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         auto& a = m_fields->analysis;
         if (a.replaying() && object != m_anticheatSpike) {
-            if (!a.outcome) a.outcome = false;
+            if (!a.outcome) {
+                a.outcome = false;
+                a.failureTick = currentTick(this);
+            }
             return;
         }
         PlayLayer::destroyPlayer(player, object);
@@ -307,16 +332,30 @@ class $modify(PulsePlay, PlayLayer) {
         PlayLayer::postUpdate(dt);
         auto& a = m_fields->analysis;
         if (!a.replaying()) return;
-        if (currentTick(this) > a.endTick + 480 && !a.outcome) a.outcome = false;
+        if (currentTick(this) > a.endTick + 480 && !a.outcome) {
+            a.outcome = false;
+            a.failureTick = currentTick(this);
+        }
         if (!a.outcome) return;
         const bool passed = *a.outcome;
+        if (a.phase == Phase::Baseline && !passed && a.verifiedTiming + 1 < timings.size()) {
+            ++a.verifiedTiming;
+            if (auto panel = hud()) {
+                const auto progress = fmt::format("Checking replay ({}/{})...",
+                    a.verifiedTiming + 1, timings.size());
+                panel->status->setString(progress.c_str());
+            }
+            restartReplay();
+            return;
+        }
         if (a.phase == Phase::Playback || (a.phase == Phase::Baseline && !passed)) {
             const bool wasPlayback = a.phase == Phase::Playback;
             a.phase = Phase::Finished;
             restartReplay();
             if (auto panel = hud()) {
-                panel->status->setString(wasPlayback && passed ? "Analysis complete"
-                    : "Replay desynced");
+                const auto status = wasPlayback && passed ? std::string("Analysis complete")
+                    : fmt::format("Replay desynced at tick {}", a.failureTick);
+                panel->status->setString(status.c_str());
             }
             return;
         }
@@ -380,24 +419,30 @@ class $modify(PulseCommands, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, playerFlag);
     }
 
-    void processCommands(float dt, bool halfTick, bool lastTick) {
-        GJBaseGameLayer::processCommands(dt, halfTick, lastTick);
+    void injectReplay(bool beforeCommands) {
         auto play = pulsePlay();
         if (!play) return;
         auto& a = play->m_fields->analysis;
         if (!a.replaying() || a.internalReset || a.outcome) return;
-        const auto tick = currentTick(this);
+        const auto timing = timings[a.verifiedTiming];
+        if (timing.beforeCommands != beforeCommands) return;
+        const auto tick = currentTick(this) - timing.offset;
         while (a.nextInput < a.replay.size() && a.replay[a.nextInput].tick <= tick) {
             const auto& input = a.replay[a.nextInput++];
             const auto savedStep = m_currentStep;
-            m_currentStep = input.step;
+            if (timing.restoreStep) m_currentStep = input.step;
             GJBaseGameLayer::handleButton(input.down, input.button, input.playerFlag);
-            m_currentStep = savedStep;
+            if (timing.restoreStep) m_currentStep = savedStep;
         }
         if (a.phase != Phase::Playback) return;
         while (a.nextMarker < a.jumps.size() &&
             a.recorded[a.jumps[a.nextMarker].press].tick <= tick) {
             play->showJump(a.jumps[a.nextMarker++]);
         }
+    }
+    void processCommands(float dt, bool halfTick, bool lastTick) {
+        injectReplay(true);
+        GJBaseGameLayer::processCommands(dt, halfTick, lastTick);
+        injectReplay(false);
     }
 };
