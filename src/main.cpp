@@ -148,7 +148,7 @@ struct Input {
     bool down;
     int button;
     bool playerFlag;
-    double step;
+    int step;
     std::optional<CCPoint> position;
 };
 
