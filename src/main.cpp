@@ -1,6 +1,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/binding/PlayerObject.hpp>
 #include <Geode/binding/PlayLayer.hpp>
 
 #include <Windows.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 using namespace geode::prelude;
 
@@ -60,14 +62,9 @@ void playDing() {
     }
 }
 
-struct JumpPress {
-    double time;
-    std::optional<CCPoint> position;
-};
-
 class CounterHUD : public CCNode {
 public:
-    std::array<std::optional<JumpPress>, 2> starts{};
+    CCLabelBMFont* status = nullptr;
     std::array<unsigned int, 7> totals{};
     std::array<CCLabelBMFont*, 7> labels{};
 
@@ -82,7 +79,7 @@ public:
         play->addChild(hud, 1000);
 
         const auto size = CCDirector::sharedDirector()->getWinSize();
-        auto title = CCLabelBMFont::create("Hold Counter", "goldFont.fnt");
+        auto title = CCLabelBMFont::create("Frame Counter", "goldFont.fnt");
         title->setAnchorPoint({0.f, 0.5f});
         title->setScale(0.42f);
         title->setPosition({12.f, size.height - 18.f});
@@ -98,6 +95,11 @@ public:
             hud->labels[i] = label;
             hud->updateRow(i);
         }
+        hud->status = CCLabelBMFont::create("", "bigFont.fnt");
+        hud->status->setAnchorPoint({0.f, 0.5f});
+        hud->status->setScale(0.33f);
+        hud->status->setPosition({12.f, size.height - 122.f});
+        hud->addChild(hud->status);
         return hud;
     }
 
@@ -137,57 +139,265 @@ public:
 };
 }
 
-class $modify(PulsePlay, PlayLayer) {
-    void resetLevel() {
-        removeChildByID(hudId);
-        PlayLayer::resetLevel();
+
+namespace {
+enum class Phase { Recording, Ready, Baseline, Scanning, Playback, Finished };
+
+struct Input {
+    int tick;
+    bool down;
+    int button;
+    bool playerFlag;
+    double step;
+    std::optional<CCPoint> position;
+};
+
+struct Jump {
+    size_t press;
+    std::optional<size_t> release;
+    int width = 1;
+};
+
+struct Analysis {
+    Phase phase = Phase::Recording;
+    std::vector<Input> recorded;
+    std::vector<Input> replay;
+    std::vector<Jump> jumps;
+    std::array<std::optional<size_t>, 2> openJump{};
+    size_t nextInput = 0;
+    size_t currentJump = 0;
+    size_t nextMarker = 0;
+    int shift = -1;
+    int endTick = 0;
+    bool internalReset = false;
+    std::optional<bool> outcome;
+
+    bool replaying() const {
+        return phase == Phase::Baseline || phase == Phase::Scanning || phase == Phase::Playback;
+    }
+
+    void record(Input input) {
+        if (input.button == 1) {
+            auto& open = openJump[input.playerFlag ? 1 : 0];
+            if (input.down && !open) {
+                open = jumps.size();
+                jumps.push_back({recorded.size(), std::nullopt});
+            } else if (!input.down && open) {
+                jumps[*open].release = recorded.size();
+                open.reset();
+            }
+        }
+        recorded.push_back(input);
+    }
+
+    bool prepareShift() {
+        const auto& jump = jumps[currentJump];
+        const auto pressTick = recorded[jump.press].tick + shift;
+        if (pressTick < 0) return false;
+
+        // Preserve the jump's input shape. Only its position on the tick grid
+        // changes, and all other jumps retain their recorded inputs.
+        for (size_t i = 0; i < recorded.size(); ++i) {
+            if (i == jump.press || (jump.release && i == *jump.release)) continue;
+            const auto& other = recorded[i];
+            const auto& press = recorded[jump.press];
+            if (other.button != press.button || other.playerFlag != press.playerFlag) continue;
+
+            if (i < jump.press && other.tick > pressTick) return false;
+            if (!jump.release && i > jump.press && other.tick < pressTick) return false;
+            if (jump.release && i > *jump.release &&
+                other.tick < recorded[*jump.release].tick + shift) return false;
+        }
+
+        replay = recorded;
+        replay[jump.press].tick = pressTick;
+        if (jump.release) replay[*jump.release].tick += shift;
+        std::stable_sort(replay.begin(), replay.end(), [](const Input& a, const Input& b) {
+            return a.tick < b.tick;
+        });
+        return true;
+    }
+
+    void advance(bool success) {
+        auto& jump = jumps[currentJump];
+        if (success) {
+            ++jump.width;
+            if (jump.width < 7) {
+                shift += shift < 0 ? -1 : 1;
+                return;
+            }
+        } else if (shift < 0) {
+            shift = 1;
+            return;
+        }
+        ++currentJump;
+        shift = -1;
     }
 };
 
-class $modify(PulsePlayer, PlayerObject) {
-    void recordJump(PlayerButton button, bool down) {
-        if (static_cast<int>(button) != 1) return;
-        auto play = PlayLayer::get();
-        if (!play || m_isDead || (this != play->m_player1 && this != play->m_player2)) return;
-        auto hud = static_cast<CounterHUD*>(play->getChildByID(hudId));
-        if (!hud && down) hud = CounterHUD::attach(play);
-        if (!hud) return;
+int currentTick(GJBaseGameLayer* layer) {
+    return static_cast<int>(std::floor(layer->m_gameState.m_levelTime * referenceRate + 0.00001));
+}
+}
 
-        auto& start = hud->starts[this == play->m_player1 ? 0 : 1];
-        const double time = play->m_gameState.m_levelTime;
-        if (!std::isfinite(time)) return;
-        if (start && time < start->time) start.reset();
-        if (down) {
-            if (!start) {
-                start = JumpPress{time, std::nullopt};
-                if (auto parent = getParent(); parent && play->m_objectLayer) {
-                    const auto world = parent->convertToWorldSpace(getPosition());
-                    start->position = play->m_objectLayer->convertToNodeSpace(world);
-                }
+class $modify(PulsePlay, PlayLayer) {
+    struct Fields {
+        Analysis analysis;
+    };
+
+    CounterHUD* hud() {
+        if (auto existing = getChildByID(hudId)) return static_cast<CounterHUD*>(existing);
+        return CounterHUD::attach(this);
+    }
+
+    void restartReplay() {
+        auto& a = m_fields->analysis;
+        a.nextInput = 0;
+        a.nextMarker = 0;
+        a.outcome.reset();
+        a.internalReset = true;
+        resetLevelFromStart();
+        a.internalReset = false;
+    }
+
+    void resetLevel() {
+        auto& a = m_fields->analysis;
+        if (a.internalReset) {
+            PlayLayer::resetLevel();
+            return;
+        }
+        const bool analyze = a.phase == Phase::Ready && !m_isPracticeMode;
+        removeChildByID(hudId);
+        if (analyze) {
+            a.phase = Phase::Baseline;
+            a.replay = a.recorded;
+        } else {
+            a = Analysis{};
+        }
+        PlayLayer::resetLevel();
+        if (analyze) {
+            if (auto panel = hud()) panel->status->setString("Checking original replay...");
+        }
+    }
+
+    void levelComplete() {
+        auto& a = m_fields->analysis;
+        if (a.replaying()) {
+            if (!a.outcome) a.outcome = a.nextInput == a.replay.size();
+            return;
+        }
+        if (a.phase == Phase::Recording && !m_isPracticeMode && !a.jumps.empty()) {
+            a.endTick = currentTick(this);
+            a.phase = Phase::Ready;
+            Notification::create("Replay the level to measure jump windows.", NotificationIcon::Info)->show();
+        }
+        PlayLayer::levelComplete();
+    }
+
+    void destroyPlayer(PlayerObject* player, GameObject* object) {
+        auto& a = m_fields->analysis;
+        if (a.replaying() && object != m_anticheatSpike) {
+            if (!a.outcome) a.outcome = false;
+            return;
+        }
+        PlayLayer::destroyPlayer(player, object);
+    }
+
+    void postUpdate(float dt) {
+        PlayLayer::postUpdate(dt);
+        auto& a = m_fields->analysis;
+        if (!a.replaying()) return;
+        if (currentTick(this) > a.endTick + 480 && !a.outcome) a.outcome = false;
+        if (!a.outcome) return;
+        const bool passed = *a.outcome;
+        if (a.phase == Phase::Playback || (a.phase == Phase::Baseline && !passed)) {
+            const bool wasPlayback = a.phase == Phase::Playback;
+            a.phase = Phase::Finished;
+            restartReplay();
+            if (auto panel = hud()) {
+                panel->status->setString(wasPlayback && passed ? "Analysis complete"
+                    : "Replay desynced");
             }
             return;
         }
-        if (!start) return;
-        const int frames = std::max(1, static_cast<int>(std::lround((time - start->time) * referenceRate)));
-        const auto position = start->position;
-        start.reset();
-        const auto bucket = std::min(frames, 7) - 1;
-        ++hud->totals[bucket];
-        hud->updateRow(bucket);
-        if (frames < 7 && position && play->m_objectLayer &&
-            Mod::get()->getSettingValue<bool>("release-markers")) {
-            hud->showMarker(play->m_objectLayer, *position, frames);
+        if (a.phase == Phase::Baseline) {
+            a.phase = Phase::Scanning;
+        } else {
+            a.advance(passed);
         }
-        if (frames == 1 && Mod::get()->getSettingValue<bool>("sound")) playDing();
+
+        while (a.currentJump < a.jumps.size() && !a.prepareShift()) a.advance(false);
+        if (a.currentJump == a.jumps.size()) {
+            a.phase = Phase::Playback;
+            a.replay = a.recorded;
+            if (auto panel = hud()) panel->status->setString("Showing measured windows...");
+        } else if (auto panel = hud()) {
+            const auto progress = fmt::format("Jump {}/{} ({:+} ticks)",
+                a.currentJump + 1, a.jumps.size(), a.shift);
+            panel->status->setString(progress.c_str());
+        }
+        restartReplay();
     }
 
-    bool pushButton(PlayerButton button) {
-        recordJump(button, true);
-        return PlayerObject::pushButton(button);
+    void showJump(const Jump& jump) {
+        auto panel = hud();
+        if (!panel) return;
+        const auto& input = m_fields->analysis.recorded[jump.press];
+        const auto bucket = jump.width - 1;
+        ++panel->totals[bucket];
+        panel->updateRow(bucket);
+        if (jump.width < 7 && input.position && m_objectLayer &&
+            Mod::get()->getSettingValue<bool>("release-markers")) {
+            panel->showMarker(m_objectLayer, *input.position, jump.width);
+        }
+        if (jump.width == 1 && Mod::get()->getSettingValue<bool>("sound")) playDing();
+    }
+};
+
+class $modify(PulseCommands, GJBaseGameLayer) {
+    PulsePlay* pulsePlay() {
+        auto play = PlayLayer::get();
+        return static_cast<GJBaseGameLayer*>(play) == this
+            ? static_cast<PulsePlay*>(play) : nullptr;
     }
 
-    bool releaseButton(PlayerButton button) {
-        recordJump(button, false);
-        return PlayerObject::releaseButton(button);
+    void handleButton(bool down, int button, bool playerFlag) {
+        auto play = pulsePlay();
+        if (play) {
+            auto& a = play->m_fields->analysis;
+            if (a.replaying() || a.internalReset) return;
+            if (a.phase == Phase::Recording && !play->m_isPracticeMode &&
+                !m_levelEndAnimationStarted && m_player1 && !m_player1->m_isDead) {
+                Input input{currentTick(this), down, button, playerFlag, m_currentStep, std::nullopt};
+                auto player = m_gameState.m_isDualMode && !playerFlag ? m_player2 : m_player1;
+                if (button == 1 && down && player && player->getParent() && m_objectLayer) {
+                    const auto world = player->getParent()->convertToWorldSpace(player->getPosition());
+                    input.position = m_objectLayer->convertToNodeSpace(world);
+                }
+                a.record(input);
+            }
+        }
+        GJBaseGameLayer::handleButton(down, button, playerFlag);
+    }
+
+    void processCommands(float dt, bool halfTick, bool lastTick) {
+        GJBaseGameLayer::processCommands(dt, halfTick, lastTick);
+        auto play = pulsePlay();
+        if (!play) return;
+        auto& a = play->m_fields->analysis;
+        if (!a.replaying() || a.internalReset || a.outcome) return;
+        const auto tick = currentTick(this);
+        while (a.nextInput < a.replay.size() && a.replay[a.nextInput].tick <= tick) {
+            const auto& input = a.replay[a.nextInput++];
+            const auto savedStep = m_currentStep;
+            m_currentStep = input.step;
+            GJBaseGameLayer::handleButton(input.down, input.button, input.playerFlag);
+            m_currentStep = savedStep;
+        }
+        if (a.phase != Phase::Playback) return;
+        while (a.nextMarker < a.jumps.size() &&
+            a.recorded[a.jumps[a.nextMarker].press].tick <= tick) {
+            play->showJump(a.jumps[a.nextMarker++]);
+        }
     }
 };
