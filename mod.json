@@ -5,9 +5,9 @@
   },
   "id": "pulsecounter.input-display",
   "name": "Pulse Counter",
-  "version": "v0.2.0",
+  "version": "v0.3.0",
   "developer": "Pulse Counter",
-  "description": "Shows jump holds in 240 Hz frame equivalents and counts them in a HUD.",
+  "description": "Measures jump timing windows by testing recorded inputs on the physics tick grid.",
   "resources": {
     "files": [
       "resources/ding.wav"
@@ -15,12 +15,12 @@
   },
   "settings": {
     "release-markers": {
-      "name": "Release markers",
+      "name": "Show jump window circles",
       "type": "bool",
       "default": true
     },
     "sound": {
-      "name": "Ding on a 1-frame hold",
+      "name": "Ding on a one-tick window",
       "type": "bool",
       "default": true
     }
