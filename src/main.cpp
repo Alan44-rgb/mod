@@ -1,6 +1,6 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/PlayLayer.hpp>
+#include <Geode/binding/PlayLayer.hpp>
 #include <Geode/binding/PlayerObject.hpp>
 
 #include <Windows.h>
@@ -51,7 +51,7 @@ void showMarker(PlayerObject* player, bool pressed, std::optional<double> durati
 
     if (shortHold && Mod::get()->getSettingValue<bool>("sound")) {
         const auto path = Mod::get()->getResourcesDir() / "ding.wav";
-        PlaySoundW(path.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+        PlaySoundA(path.c_str(), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
     }
 }
 }
@@ -63,7 +63,7 @@ class $modify(PulseInput, GJBaseGameLayer) {
 
     void handleButton(bool down, int button, bool isPlayer1) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
-        if (button != 1 || PlayLayer::get() != this) return;
+        if (button != 1 || static_cast<GJBaseGameLayer*>(PlayLayer::get()) != this) return;
 
         auto player = isPlayer1 ? m_player1 : m_player2;
         if (!player || player->m_isDead) return;
