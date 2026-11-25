@@ -5,8 +5,23 @@ permissions:
 jobs:
   windows:
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gd: '2.2081'
+            geode: '5.10.1'
+          - gd: '2.2091'
+            geode: '6.0.0'
     steps:
       - uses: actions/checkout@v4
+      - name: Configure target versions
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -Raw mod.json | ConvertFrom-Json
+          $manifest.gd.win = '${{ matrix.gd }}'
+          $manifest.geode = '${{ matrix.geode }}'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM mod.json
       - name: Decode sound asset
         shell: pwsh
         run: |
@@ -19,6 +34,6 @@ jobs:
           target: Win64
       - uses: actions/upload-artifact@v4
         with:
-          name: PulseCounter-Windows
+          name: PulseCounter-Windows-${{ matrix.gd }}
           path: ${{ steps.build.outputs.build-output }}
           if-no-files-found: error
